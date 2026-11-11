@@ -1,0 +1,281 @@
+# Kafka endpoint, image registry, API URL은 환경에 맞게 변경해야 합니다.
+#
+# 필요한 Kafka Topic:
+# ix.raw.logs
+# ix.collector.checkpoints
+#
+# 체크포인트 Topic:
+# partitions=1
+# cleanup.policy=compact
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ix-api-config
+
+data:
+  device.json: |
+    {
+      "name": "example-firewall",
+      "url": "https://device.example/api/logs",
+      "items_path": "data.items",
+      "next_cursor_path": "data.next_cursor",
+      "record_id_path": "id",
+      "cursor_param": "cursor",
+      "interval_seconds": 30,
+      "auth_env": "DEVICE_API_TOKEN"
+    }
+
+---
+# UDP Collector
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: ix-collector-udp
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: ix-collector-udp
+
+  template:
+    metadata:
+      labels:
+        app: ix-collector-udp
+
+    spec:
+      containers:
+        - name: collector
+          image: ix-soar/collector:0.2.0
+
+          env:
+            - name: COLLECTOR_MODE
+              value: syslog-udp
+
+            - name: KAFKA_BROKERS
+              value: kafka-bootstrap:9092
+
+          ports:
+            - name: syslog
+              containerPort: 1514
+              protocol: UDP
+
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: ix-collector-udp
+
+spec:
+  selector:
+    app: ix-collector-udp
+
+  ports:
+    - name: syslog
+      port: 1514
+      targetPort: 1514
+      protocol: UDP
+
+---
+# TCP Collector
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: ix-collector-tcp
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: ix-collector-tcp
+
+  template:
+    metadata:
+      labels:
+        app: ix-collector-tcp
+
+    spec:
+      containers:
+        - name: collector
+          image: ix-soar/collector:0.2.0
+
+          env:
+            - name: COLLECTOR_MODE
+              value: syslog-tcp
+
+            - name: KAFKA_BROKERS
+              value: kafka-bootstrap:9092
+
+            - name: TCP_FRAMING
+              value: auto
+
+          ports:
+            - name: syslog
+              containerPort: 1514
+              protocol: TCP
+
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: ix-collector-tcp
+
+spec:
+  selector:
+    app: ix-collector-tcp
+
+  ports:
+    - name: syslog
+      port: 1514
+      targetPort: 1514
+      protocol: TCP
+
+---
+# API Collector
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: ix-collector-api
+
+spec:
+  replicas: 1
+
+  # 동일 장비에 대해 두 Pod가 동시에 조회하지 않도록 설정
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app: ix-collector-api
+
+  template:
+    metadata:
+      labels:
+        app: ix-collector-api
+
+    spec:
+      containers:
+        - name: collector
+          image: ix-soar/collector:0.2.0
+
+          env:
+            - name: COLLECTOR_MODE
+              value: api
+
+            - name: KAFKA_BROKERS
+              value: kafka-bootstrap:9092
+
+            - name: API_CONFIG_PATH
+              value: /config/device.json
+
+            - name: DEVICE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ix-device-api
+                  key: token
+
+          volumeMounts:
+            - name: api-config
+              mountPath: /config
+              readOnly: true
+
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+      volumes:
+        - name: api-config
+          configMap:
+            name: ix-api-config

@@ -1,0 +1,145 @@
+# ---------------------------------------
+# 1. Headless Service
+# ---------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: ix-clickhouse-headless
+  namespace: ix-soar
+
+spec:
+  clusterIP: None
+
+  selector:
+    app: ix-clickhouse
+
+  ports:
+    - name: http
+      port: 8123
+
+    - name: native
+      port: 9000
+
+---
+# ---------------------------------------
+# 2. ClickHouse Service
+# ---------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: ix-clickhouse
+  namespace: ix-soar
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: ix-clickhouse
+
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+
+    - name: native
+      port: 9000
+      targetPort: 9000
+
+---
+# ---------------------------------------
+# 3. ClickHouse StatefulSet
+# ---------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ix-clickhouse
+  namespace: ix-soar
+
+spec:
+  serviceName: ix-clickhouse-headless
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: ix-clickhouse
+
+  template:
+    metadata:
+      labels:
+        app: ix-clickhouse
+
+    spec:
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:26.8
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8123
+
+            - name: native
+              containerPort: 9000
+
+          env:
+            - name: CLICKHOUSE_DB
+              value: ix_soar
+
+            - name: CLICKHOUSE_USER
+              value: ix_admin
+
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ix-clickhouse-auth
+                  key: password
+
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+
+            limits:
+              cpu: "2"
+              memory: 3Gi
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+
+      spec:
+        accessModes:
+          - ReadWriteOnce
+
+        resources:
+          requests:
+            storage: 20Gi
